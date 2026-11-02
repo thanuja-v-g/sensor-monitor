@@ -1,7 +1,7 @@
-:name: My STM32 hello
+:name: Project pipeline
 using sysbus
-mach create "hello"
+mach create "project-pipeline"
 machine LoadPlatformDescription @platforms/boards/stm32f4_discovery-kit.repl
 showAnalyzer sysbus.usart2
-sysbus LoadELF @E:/embedded/project/sensor-monitor/build/hello.elf
+sysbus LoadELF @E:/embedded/project/sensor-pipeline/build/hello.elf
 start

@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
 
 /* Serial port (USART2) control registers: special memory addresses */
 #define RCC_APB1ENR (*(volatile uint32_t *)0x40023840)
@@ -25,25 +26,83 @@ void send_text(const char *text)
     }
 }
 
-/* Task A: prints a message, then sleeps for 500 ms, forever */
-void task_a(void *param)
+/* Send a number as text, for example 42 becomes '4' then '2' */
+void send_number(int n)
+{
+    char digits[10];
+    int count = 0;
+
+    if (n == 0)
+    {
+        send_char('0');
+        return;
+    }
+
+    while (n > 0)
+    {
+        digits[count] = '0' + (n % 10);   /* last digit, as a character */
+        n = n / 10;                       /* remove the last digit */
+        count++;
+    }
+
+    while (count > 0)                     /* digits are backwards, so send in reverse */
+    {
+        count--;
+        send_char(digits[count]);
+    }
+}
+
+/* Fake temperature readings, like a sensor would give (in degrees C) */
+int readings[10] = {25, 26, 27, 29, 31, 33, 32, 30, 28, 26};
+
+/* The queue: a safe pipe that carries readings from one task to another */
+QueueHandle_t reading_queue;
+
+/* Sampling task: "reads the sensor" every 500 ms and puts the value in the queue */
+void sampling_task(void *param)
 {
     (void)param;
+    int index = 0;
+
     while (1)
     {
-        send_text("Task A running\r\n");
+        int temp = readings[index];
+        xQueueSend(reading_queue, &temp, 0);   /* put it in the pipe */
+        index = (index + 1) % 10;
+
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
-/* Task B: prints a message, then sleeps for 800 ms, forever */
-void task_b(void *param)
+/* Processing task: waits for readings, averages the last 4, prints, raises alert */
+void processing_task(void *param)
 {
     (void)param;
+    int window[4] = {0, 0, 0, 0};
+    int w = 0;
+    int temp;
+
     while (1)
     {
-        send_text("   Task B running\r\n");
-        vTaskDelay(pdMS_TO_TICKS(800));
+        /* sleep until a reading arrives in the queue */
+        if (xQueueReceive(reading_queue, &temp, portMAX_DELAY) == pdTRUE)
+        {
+            window[w] = temp;
+            w = (w + 1) % 4;
+
+            int average = (window[0] + window[1] + window[2] + window[3]) / 4;
+
+            send_text("temp = ");
+            send_number(temp);
+            send_text("  average = ");
+            send_number(average);
+
+            if (average > 30)
+            {
+                send_text("  ALERT: too hot");
+            }
+            send_text("\r\n");
+        }
     }
 }
 
@@ -52,17 +111,18 @@ int main(void)
     RCC_APB1ENR |= (1 << 17);             /* give clock to USART2 */
     USART2_CR1 = (1 << 13) | (1 << 3);    /* turn serial port on, enable transmit */
 
-    send_text("FreeRTOS started\r\n");
+    send_text("Sensor pipeline started\r\n");
 
-    xTaskCreate(task_a, "A", 256, NULL, 1, NULL);   /* create task A */
-    xTaskCreate(task_b, "B", 256, NULL, 1, NULL);   /* create task B */
+    reading_queue = xQueueCreate(8, sizeof(int));   /* room for 8 readings */
 
-    vTaskStartScheduler();                /* hand control to FreeRTOS */
+    xTaskCreate(sampling_task,   "sample",  256, NULL, 2, NULL);   /* priority 2 */
+    xTaskCreate(processing_task, "process", 256, NULL, 1, NULL);   /* priority 1 */
 
-    while (1) { }                         /* never reached */
+    vTaskStartScheduler();
+
+    while (1) { }
 }
 
-/* FreeRTOS calls this if a task uses more memory than it was given */
 void vApplicationStackOverflowHook(TaskHandle_t t, char *name)
 {
     (void)t;
@@ -71,7 +131,6 @@ void vApplicationStackOverflowHook(TaskHandle_t t, char *name)
     while (1) { }
 }
 
-/* FreeRTOS calls this if it runs out of memory for tasks */
 void vApplicationMallocFailedHook(void)
 {
     send_text("MALLOC FAILED\r\n");
